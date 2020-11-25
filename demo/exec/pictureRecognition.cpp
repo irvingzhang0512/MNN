@@ -29,7 +29,12 @@ int main(int argc, const char* argv[]) {
         MNN_PRINT("Usage: ./pictureTest.out model.mnn input.jpg [word.txt]\n");
         return 0;
     }
+    // 创建 Interpreter，模型数据的持有者
     std::shared_ptr<Interpreter> net(Interpreter::createFromFile(argv[1]));
+
+    // 创建 Session，推理数据的持有者
+    // 创建Session 一般而言需要较长耗时
+    // 而 Session 在多次推理过程中可以重复使用，建议只创建一次多次使用
     ScheduleConfig config;
     config.type  = MNN_FORWARD_AUTO;
     // BackendConfig bnconfig;
@@ -37,12 +42,17 @@ int main(int argc, const char* argv[]) {
     // config.backendConfig = &bnconfig;
     auto session = net->createSession(config);
 
+    // 创建输入 tensor
     auto input = net->getSessionInput(session, NULL);
     auto shape = input->shape();
     shape[0]   = 1;
     net->resizeTensor(input, shape);
     net->resizeSession(session);
+
+    // 得到模型输出
     auto output = net->getSessionOutput(session, NULL);
+    
+    // class id -> class name
     std::vector<std::string> words;
     if (argc >= 4) {
         std::ifstream inputOs(argv[3]);
@@ -52,6 +62,7 @@ int main(int argc, const char* argv[]) {
         }
     }
     {
+        // 模型输入总结
         auto dims    = input->shape();
         int inputDim = 0;
         int size_w   = 0;
@@ -68,6 +79,7 @@ int main(int argc, const char* argv[]) {
             size_w = 1;
         MNN_PRINT("input: w:%d , h:%d, bpp: %d\n", size_w, size_h, bpp);
 
+        // 读取图片
         auto inputPatch = argv[2];
         int width, height, channel;
         auto inputImage = stbi_load(inputPatch, &width, &height, &channel, 4);
@@ -76,6 +88,8 @@ int main(int argc, const char* argv[]) {
             return 0;
         }
         MNN_PRINT("origin size: %d, %d\n", width, height);
+        
+        // 设置图像中的matrix
         Matrix trans;
         // Set transform, from dst scale to src, the ways below are both ok
 #ifdef USE_MAP_POINT
@@ -95,6 +109,7 @@ int main(int argc, const char* argv[]) {
 #else
         trans.setScale((float)(width-1) / (size_w-1), (float)(height-1) / (size_h-1));
 #endif
+        // 图像处理相关，包括 resize/norm/channel转换 三个功能
         ImageProcess::Config config;
         config.filterType = BILINEAR;
         float mean[3]     = {103.94f, 116.78f, 123.68f};
@@ -106,12 +121,18 @@ int main(int argc, const char* argv[]) {
         config.sourceFormat = RGBA;
         config.destFormat   = BGR;
 
+        // 处理图像
+        // 不知道Matrix输入是干什么用，是不是具体实现各种转换操作？
         std::shared_ptr<ImageProcess> pretreat(ImageProcess::create(config));
         pretreat->setMatrix(trans);
         pretreat->convert((uint8_t*)inputImage, width, height, 0, input);
         stbi_image_free(inputImage);
     }
+
+    // 运行 Session
     net->runSession(session);
+
+    // 获取模型结果
     {
         auto dimType = output->getDimensionType();
         if (output->getType().code != halide_type_float) {
@@ -119,10 +140,13 @@ int main(int argc, const char* argv[]) {
         }
         std::shared_ptr<Tensor> outputUser(new Tensor(output, dimType));
         MNN_PRINT("output size:%d\n", outputUser->elementSize());
+
+        // 获取模型输出tensor内容
         output->copyToHostTensor(outputUser.get());
         auto type = outputUser->getType();
-
         auto size = outputUser->elementSize();
+
+        // 将结果转换为 vector<pair<int, float>>
         std::vector<std::pair<int, float>> tempValues(size);
         if (type.code == halide_type_float) {
             auto values = outputUser->host<float>();
@@ -136,7 +160,8 @@ int main(int argc, const char* argv[]) {
                 tempValues[i] = std::make_pair(i, values[i]);
             }
         }
-        // Find Max
+
+        // 获取概率最高的10类输出
         std::sort(tempValues.begin(), tempValues.end(),
                   [](std::pair<int, float> a, std::pair<int, float> b) { return a.second > b.second; });
 
